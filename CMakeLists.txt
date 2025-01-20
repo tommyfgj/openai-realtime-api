@@ -18,7 +18,7 @@ if(DEFINED ENV{LOG_DATACHANNEL_MESSAGES})
 endif()
 
 add_compile_definitions(OPENAI_API_KEY="$ENV{OPENAI_API_KEY}")
-add_compile_definitions(OPENAI_REALTIMEAPI="https://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17")
+add_compile_definitions(OPENAI_REALTIMEAPI="https://s.sdad22624319.cn:8877/whip")
 
 set(COMPONENTS src)
 set(EXTRA_COMPONENT_DIRS "src" "components/srtp" "components/peer" "components/esp-libopus")

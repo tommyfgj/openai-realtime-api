@@ -15,6 +15,7 @@
   "[\"audio\", \"text\"], \"instructions\": \"Say 'How can I help?.'\"}}"
 
 PeerConnection *peer_connection = NULL;
+static TaskHandle_t xPcTaskHandle = NULL;
 
 #ifndef LINUX_BUILD
 StaticTask_t task_buffer;
@@ -58,12 +59,12 @@ static void oai_onconnectionstatechange_task(PeerConnectionState state,
     esp_restart();
 #endif
   } else if (state == PEER_CONNECTION_CONNECTED) {
-#ifndef LINUX_BUILD
-    StackType_t *stack_memory = (StackType_t *)heap_caps_malloc(
-        20000 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
-    xTaskCreateStaticPinnedToCore(oai_send_audio_task, "audio_publisher", 20000,
-                                  NULL, 7, stack_memory, &task_buffer, 0);
-#endif
+// #ifndef LINUX_BUILD
+//     StackType_t *stack_memory = (StackType_t *)heap_caps_malloc(
+//         20000 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+//     xTaskCreateStaticPinnedToCore(oai_send_audio_task, "audio_publisher", 20000,
+//                                   NULL, 7, stack_memory, &task_buffer, 0);
+// #endif
   }
 }
 
@@ -71,12 +72,13 @@ static void oai_on_icecandidate_task(char *description, void *user_data) {
   char local_buffer[MAX_HTTP_OUTPUT_BUFFER + 1] = {0};
   oai_http_request(description, local_buffer);
   peer_connection_set_remote_description(peer_connection, local_buffer);
+  // peer_signaling_http_post("s.sdad22624319.cn", "/whip", 8877, "", description);
 }
 
 void oai_webrtc() {
   PeerConfiguration peer_connection_config = {
       .ice_servers = {},
-      .audio_codec = CODEC_OPUS,
+      .audio_codec = CODEC_PCMA,
       .video_codec = CODEC_NONE,
       .datachannel = DATA_CHANNEL_STRING,
       .onaudiotrack = [](uint8_t *data, size_t size, void *userdata) -> void {
@@ -97,14 +99,18 @@ void oai_webrtc() {
 #endif
   }
 
+
+
   peer_connection_oniceconnectionstatechange(peer_connection,
                                              oai_onconnectionstatechange_task);
   peer_connection_onicecandidate(peer_connection, oai_on_icecandidate_task);
   peer_connection_ondatachannel(peer_connection,
                                 oai_ondatachannel_onmessage_task,
                                 oai_ondatachannel_onopen_task, NULL);
-
+  // peer_signaling_connect("mqtts://s.sdad22624319.cn/public/spotted-happy-panda", "dGVzdDp0ZXN0", peer_connection);
   peer_connection_create_offer(peer_connection);
+
+  // xTaskCreatePinnedToCore(peer_connection_task, "peer_connection", 8192, NULL, 5, &xPcTaskHandle, 1);
 
   while (1) {
     peer_connection_loop(peer_connection);
