@@ -9,13 +9,16 @@
 #include "esp_system.h"
 #include <stdlib.h>
 #include <sys/time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/ringbuf.h"
 
 
 #include "main.h"
 
 #define OPUS_OUT_BUFFER_SIZE 1276  // 1276 bytes is recommended by opus_encode
 #define SAMPLE_RATE 8000
-#define BUFFER_SAMPLES 960
+#define BUFFER_SAMPLES 320
 
 #define MCLK_PIN 0
 #define DAC_BCLK_PIN 15
@@ -197,7 +200,7 @@ void oai_init_audio_decoder() {
   //       .cfg = &g711_cfg,
   //       .cfg_sz = sizeof(esp_g711_dec_cfg_t),
   //   };
-  esp_g711a_dec_register();
+  // esp_g711a_dec_register();
   // ret = esp_audio_dec_open(&dec_cfg, &g_decoder);
   // if (ret != ESP_AUDIO_ERR_OK) {
   //   ESP_LOGE(LOG_TAG, "Fail to open decoder ret %d", ret);
@@ -216,34 +219,84 @@ void oai_init_audio_decoder() {
   // output_buffer = (opus_int16 *)malloc(BUFFER_SAMPLES * sizeof(opus_int16));
 }
 
-#define PCM_BUFFER_SIZE 7680 // 8KB
+// #define PCM_BUFFER_SIZE 7680 // 8KB
 
-static int16_t pcmBuffer[PCM_BUFFER_SIZE / sizeof(int16_t)]; // 缓存用于存储PCM数据
-static size_t pcmBufferIndex = 0; // 当前缓存写入位置
+// static int16_t pcmBuffer[PCM_BUFFER_SIZE / sizeof(int16_t)]; // 缓存用于存储PCM数据
+// static size_t pcmBufferIndex = 0; // 当前缓存写入位置
+
+#define RINGBUFFER_SIZE (160 * 1024) // 16KB的RingBuffer
+#define BUFFER_THRESHOLD (8 * 960) // 8KB的阈值
+
+static RingbufHandle_t xRingbuffer = NULL;
+
+void init_ringbuffer(void) {
+    xRingbuffer = xRingbufferCreate(RINGBUFFER_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (xRingbuffer == NULL) {
+        ESP_LOGE(LOG_TAG, "Failed to create ring buffer");
+    }
+}
 
 void oai_audio_decode(uint8_t *data, size_t size) {
-    char buffer[21]; // 最大20位数字加上终止符
+    char buffer[21];
     snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)get_timestamp());
     ESP_LOGD(LOG_TAG, "oai_audio_decode: %s, size: %d", buffer, size);
-    
-    int16_t pcmData[size];
-    convertALawBufferToPCM16(data, pcmData, size);
 
-    // 将解码后的PCM数据存储到缓存中
-    if (pcmBufferIndex + size > PCM_BUFFER_SIZE / sizeof(int16_t)) {
-        // 如果缓存中的数据超过8KB，执行I2S操作
-        size_t bytes_written = 0;
-        i2s_write(I2S_NUM_1, pcmBuffer, pcmBufferIndex * sizeof(int16_t),
-                  &bytes_written, portMAX_DELAY);
+    // int16_t pcmData[size];
+    // convertALawBufferToPCM16(data, pcmData, size);
 
-        // 清空缓存
-        pcmBufferIndex = 0;
-    }
-    
-    // 将当前PCM数据拷贝到缓存中
-    memcpy(&pcmBuffer[pcmBufferIndex], pcmData, size * sizeof(int16_t));
-    pcmBufferIndex += size;
+    // if (xRingbufferSend(xRingbuffer, pcmData, size * sizeof(int16_t), portMAX_DELAY) != pdTRUE) {
+    //     ESP_LOGE(LOG_TAG, "Failed to write to ring buffer");
+    // }
 }
+
+void i2s_task(void *arg) {
+    size_t item_size;
+    int16_t *item;
+
+    while (1) {
+        size_t available_size = xRingbufferGetMaxItemSize(xRingbuffer);
+
+        if (available_size >= BUFFER_THRESHOLD) {
+            item = (int16_t *)xRingbufferReceive(xRingbuffer, &item_size, portMAX_DELAY);
+
+            if (item != NULL) {
+                size_t bytes_written = 0;
+                i2s_write(I2S_NUM_1, item, item_size, &bytes_written, portMAX_DELAY);
+                vRingbufferReturnItem(xRingbuffer, (void *)item);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // 每100ms检查一次
+    }
+}
+
+void start_i2s_task(void) {
+    const BaseType_t core_id = 1; // 核心0为第一个核心，核心1为第二个核心
+    xTaskCreatePinnedToCore(i2s_task, "i2s_task", 2048, NULL, 5, NULL, core_id);
+}
+// void oai_audio_decode(uint8_t *data, size_t size) {
+//     char buffer[21]; // 最大20位数字加上终止符
+//     snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)get_timestamp());
+//     ESP_LOGD(LOG_TAG, "oai_audio_decode: %s, size: %d", buffer, size);
+    
+//     int16_t pcmData[size];
+//     convertALawBufferToPCM16(data, pcmData, size);
+
+//     // 将解码后的PCM数据存储到缓存中
+//     if (pcmBufferIndex + size > PCM_BUFFER_SIZE / sizeof(int16_t)) {
+//         // 如果缓存中的数据超过8KB，执行I2S操作
+//         size_t bytes_written = 0;
+//         i2s_write(I2S_NUM_1, pcmBuffer, pcmBufferIndex * sizeof(int16_t),
+//                   &bytes_written, portMAX_DELAY);
+
+//         // 清空缓存
+//         pcmBufferIndex = 0;
+//     }
+    
+//     // 将当前PCM数据拷贝到缓存中
+//     memcpy(&pcmBuffer[pcmBufferIndex], pcmData, size * sizeof(int16_t));
+//     pcmBufferIndex += size;
+// }
 
 // void oai_audio_decode(uint8_t *data, size_t size) {
 //   char buffer[21]; // 最大20位数字加上终止符
@@ -262,40 +315,131 @@ opus_int16 *encoder_input_buffer = NULL;
 uint8_t *encoder_output_buffer = NULL;
 
 void oai_init_audio_encoder() {
-  // int encoder_error;
-  // opus_encoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP,
-  //                                    &encoder_error);
-  // if (encoder_error != OPUS_OK) {
-  //   printf("Failed to create OPUS encoder");
-  //   return;
-  // }
+  int encoder_error;
+  opus_encoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP,
+                                     &encoder_error);
+  if (encoder_error != OPUS_OK) {
+    printf("Failed to create OPUS encoder");
+    return;
+  }
 
-  // if (opus_encoder_init(opus_encoder, SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP) !=
-  //     OPUS_OK) {
-  //   printf("Failed to initialize OPUS encoder");
-  //   return;
-  // }
+  if (opus_encoder_init(opus_encoder, SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP) !=
+      OPUS_OK) {
+    printf("Failed to initialize OPUS encoder");
+    return;
+  }
 
-  // opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(OPUS_ENCODER_BITRATE));
-  // opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(OPUS_ENCODER_COMPLEXITY));
-  // opus_encoder_ctl(opus_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
-  // encoder_input_buffer = (opus_int16 *)malloc(BUFFER_SAMPLES);
-  // encoder_output_buffer = (uint8_t *)malloc(OPUS_OUT_BUFFER_SIZE);
+  opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(OPUS_ENCODER_BITRATE));
+  opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(OPUS_ENCODER_COMPLEXITY));
+  opus_encoder_ctl(opus_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+  encoder_input_buffer = (opus_int16 *)malloc(BUFFER_SAMPLES);
+  encoder_output_buffer = (uint8_t *)malloc(OPUS_OUT_BUFFER_SIZE);
 }
+
+#define ALAW_MAX 0xFFF
+#define ALAW_BIAS 0x84
+
+static uint8_t linear_to_alaw(int16_t pcm_val) {
+    int16_t mask;
+    int16_t seg;
+    uint8_t aval;
+
+    // Convert from 16-bit signed to 13-bit signed
+    if (pcm_val >= 0) {
+        mask = 0xD5; // Sign (7th) bit = 1
+    } else {
+        mask = 0x55; // Sign bit = 0
+        pcm_val = -pcm_val - 1;
+    }
+
+    // Bias the input
+    pcm_val += ALAW_BIAS;
+
+    if (pcm_val > ALAW_MAX) {
+        pcm_val = ALAW_MAX;
+    }
+
+    // Find the segment
+    if (pcm_val >= 256) {
+        seg = 7;
+        for (int i = 0x4000; i > 0xFF; i >>= 1) {
+            if (pcm_val & i) {
+                seg++;
+            }
+        }
+        aval = (seg << 4) | ((pcm_val >> (seg + 3)) & 0x0F);
+    } else {
+        aval = pcm_val >> 4;
+    }
+
+    return aval ^ mask;
+}
+
+#define QUANT_MASK      (0xf)           /* Quantization field mask. */
+#define NSEGS           (8)             /* Number of A-law segments. */
+#define SEG_SHIFT       (4)             /* Left shift for segment number. */
+
+void lin2alaw(int16_t *linp, uint8_t *alawp, int linc, int ainc, long npts)
+{
+    int linear, seg; 
+    uint8_t aval, mask;
+    static int16_t seg_aend[NSEGS] 
+        = {0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff};
+    long i;
+
+    for (i = 0; i < npts; ++i) {
+        linear = (*linp) >> 3;
+
+        if (linear >= 0) {
+            mask = 0xd5;                /* sign (7th) bit = 1 */
+        } else {
+            mask = 0x55;                /* sign bit = 0 */
+            linear = -linear - 1;
+        }
+
+        /* Convert the scaled magnitude to segment number. */
+        for (seg = 0; seg < NSEGS && linear > seg_aend[seg]; seg++);
+  
+        /* Combine the sign, segment, and quantization bits. */
+        if (seg >= NSEGS) {             /* out of range, return maximum value. */
+            aval = (uint8_t)(0x7F ^ mask);
+        } else {
+            aval = (uint8_t)seg << SEG_SHIFT;
+            if (seg < 2)
+                aval |= (linear >> 1) & QUANT_MASK;
+            else
+                aval |= (linear >> seg) & QUANT_MASK;
+            aval = (aval ^ mask);
+        }
+
+        /* alaw */
+        *alawp = aval;
+
+        alawp += ainc;
+        linp += linc;
+    }
+}
+
+void pcm_to_alaw(const int16_t* pcm_samples, uint8_t* alaw_samples, size_t num_samples) {
+    for (size_t i = 0; i < num_samples; ++i) {
+        alaw_samples[i] = linear_to_alaw(pcm_samples[i]);
+    }
+}
+
 
 void oai_send_audio(PeerConnection *peer_connection) {
   size_t bytes_read = 0;
 
-  i2s_read(I2S_NUM_0, encoder_output_buffer, BUFFER_SAMPLES, &bytes_read,
+  int16_t buf[BUFFER_SAMPLES];
+  i2s_read(I2S_NUM_0, buf, BUFFER_SAMPLES*sizeof(int16_t), &bytes_read,
            portMAX_DELAY);
-
-
+  // ESP_LOGI(LOG_TAG, "READ BYTE: %d", bytes_read);
+  uint8_t pcmaBuf[bytes_read/sizeof(int16_t)];
+  lin2alaw(buf, pcmaBuf, 1, 1, bytes_read/sizeof(int16_t));
   // auto encoded_size =
   //     opus_encode(opus_encoder, encoder_input_buffer, BUFFER_SAMPLES / 2,
   //                 encoder_output_buffer, OPUS_OUT_BUFFER_SIZE);
 
-  // peer_connection_send_audio(peer_connection, encoder_output_buffer,
-  //                            encoded_size);
-  // peer_connection_send_audio(peer_connection, encoder_output_buffer,
-  //                            bytes_read);
+  peer_connection_send_audio(peer_connection, pcmaBuf,
+                             bytes_read/sizeof(int16_t));
 }
