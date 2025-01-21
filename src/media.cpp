@@ -14,7 +14,10 @@
 #include "freertos/ringbuf.h"
 
 
+
 #include "main.h"
+#include "media.h"
+#include "webrtc.h"
 
 #define OPUS_OUT_BUFFER_SIZE 1276  // 1276 bytes is recommended by opus_encode
 #define SAMPLE_RATE 8000
@@ -30,6 +33,7 @@
 
 #define OPUS_ENCODER_BITRATE 30000
 #define OPUS_ENCODER_COMPLEXITY 0
+
 
 typedef union {
     esp_opus_dec_cfg_t  opus_cfg;
@@ -179,7 +183,7 @@ int16_t alawToPCM(uint8_t alawbyte) {
 
 int16_t convertALawToPCM16(uint8_t aLawByte) {
     // return aLawToPcmTable[aLawByte];
-    return alawToPCM(aLawByte)*0.3;
+    return alawToPCM(aLawByte)*1.5;
 }
 
 // Convert a buffer of PCMA data to PCM16
@@ -190,7 +194,8 @@ void convertALawBufferToPCM16(const uint8_t *aLawData, int16_t *pcmData, size_t 
 }
 
 void oai_init_audio_decoder() {
-
+    printf("enter oai_init_audio_decoder\n");
+    // xTaskCreate(uart_task, "uart_task", 2048, NULL, 10, NULL);
   // int ret = 0;
   // esp_g711_dec_cfg_t g711_cfg = {
   //   .channel = 1,
@@ -224,8 +229,8 @@ void oai_init_audio_decoder() {
 // static int16_t pcmBuffer[PCM_BUFFER_SIZE / sizeof(int16_t)]; // 缓存用于存储PCM数据
 // static size_t pcmBufferIndex = 0; // 当前缓存写入位置
 
-#define RINGBUFFER_SIZE (160 * 1024) // 16KB的RingBuffer
-#define BUFFER_THRESHOLD (8 * 960) // 8KB的阈值
+#define RINGBUFFER_SIZE (160 * 1024) // 160KB的RingBuffer
+#define BUFFER_THRESHOLD (1 * 320) // 8KB的阈值
 
 static RingbufHandle_t xRingbuffer = NULL;
 
@@ -241,12 +246,12 @@ void oai_audio_decode(uint8_t *data, size_t size) {
     snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)get_timestamp());
     ESP_LOGD(LOG_TAG, "oai_audio_decode: %s, size: %d", buffer, size);
 
-    // int16_t pcmData[size];
-    // convertALawBufferToPCM16(data, pcmData, size);
+    int16_t pcmData[size];
+    convertALawBufferToPCM16(data, pcmData, size);
 
-    // if (xRingbufferSend(xRingbuffer, pcmData, size * sizeof(int16_t), portMAX_DELAY) != pdTRUE) {
-    //     ESP_LOGE(LOG_TAG, "Failed to write to ring buffer");
-    // }
+    if (xRingbufferSend(xRingbuffer, pcmData, size * sizeof(int16_t), portMAX_DELAY) != pdTRUE) {
+        ESP_LOGE(LOG_TAG, "Failed to write to ring buffer");
+    }
 }
 
 void i2s_task(void *arg) {
@@ -266,7 +271,7 @@ void i2s_task(void *arg) {
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // 每100ms检查一次
+        vTaskDelay(pdMS_TO_TICKS(1)); // 每100ms检查一次
     }
 }
 
@@ -375,50 +380,7 @@ static uint8_t linear_to_alaw(int16_t pcm_val) {
     return aval ^ mask;
 }
 
-#define QUANT_MASK      (0xf)           /* Quantization field mask. */
-#define NSEGS           (8)             /* Number of A-law segments. */
-#define SEG_SHIFT       (4)             /* Left shift for segment number. */
 
-void lin2alaw(int16_t *linp, uint8_t *alawp, int linc, int ainc, long npts)
-{
-    int linear, seg; 
-    uint8_t aval, mask;
-    static int16_t seg_aend[NSEGS] 
-        = {0x1f, 0x3f, 0x7f, 0xff, 0x1ff, 0x3ff, 0x7ff, 0xfff};
-    long i;
-
-    for (i = 0; i < npts; ++i) {
-        linear = (*linp) >> 3;
-
-        if (linear >= 0) {
-            mask = 0xd5;                /* sign (7th) bit = 1 */
-        } else {
-            mask = 0x55;                /* sign bit = 0 */
-            linear = -linear - 1;
-        }
-
-        /* Convert the scaled magnitude to segment number. */
-        for (seg = 0; seg < NSEGS && linear > seg_aend[seg]; seg++);
-  
-        /* Combine the sign, segment, and quantization bits. */
-        if (seg >= NSEGS) {             /* out of range, return maximum value. */
-            aval = (uint8_t)(0x7F ^ mask);
-        } else {
-            aval = (uint8_t)seg << SEG_SHIFT;
-            if (seg < 2)
-                aval |= (linear >> 1) & QUANT_MASK;
-            else
-                aval |= (linear >> seg) & QUANT_MASK;
-            aval = (aval ^ mask);
-        }
-
-        /* alaw */
-        *alawp = aval;
-
-        alawp += ainc;
-        linp += linc;
-    }
-}
 
 void pcm_to_alaw(const int16_t* pcm_samples, uint8_t* alaw_samples, size_t num_samples) {
     for (size_t i = 0; i < num_samples; ++i) {
@@ -428,18 +390,19 @@ void pcm_to_alaw(const int16_t* pcm_samples, uint8_t* alaw_samples, size_t num_s
 
 
 void oai_send_audio(PeerConnection *peer_connection) {
-  size_t bytes_read = 0;
+//   size_t bytes_read = 0;
 
-  int16_t buf[BUFFER_SAMPLES];
-  i2s_read(I2S_NUM_0, buf, BUFFER_SAMPLES*sizeof(int16_t), &bytes_read,
-           portMAX_DELAY);
-  // ESP_LOGI(LOG_TAG, "READ BYTE: %d", bytes_read);
-  uint8_t pcmaBuf[bytes_read/sizeof(int16_t)];
-  lin2alaw(buf, pcmaBuf, 1, 1, bytes_read/sizeof(int16_t));
-  // auto encoded_size =
-  //     opus_encode(opus_encoder, encoder_input_buffer, BUFFER_SAMPLES / 2,
-  //                 encoder_output_buffer, OPUS_OUT_BUFFER_SIZE);
+//   int16_t buf[BUFFER_SAMPLES];
+//   i2s_read(I2S_NUM_0, buf, BUFFER_SAMPLES*sizeof(int16_t), &bytes_read,
+//            portMAX_DELAY);
+//   // ESP_LOGI(LOG_TAG, "READ BYTE: %d", bytes_read);
+//   uint8_t pcmaBuf[bytes_read/sizeof(int16_t)];
+//   lin2alaw(buf, pcmaBuf, 1, 1, bytes_read/sizeof(int16_t));
+//   // auto encoded_size =
+//   //     opus_encode(opus_encoder, encoder_input_buffer, BUFFER_SAMPLES / 2,
+//   //                 encoder_output_buffer, OPUS_OUT_BUFFER_SIZE);
 
-  peer_connection_send_audio(peer_connection, pcmaBuf,
-                             bytes_read/sizeof(int16_t));
+//   peer_connection_send_audio(peer_connection, pcmaBuf,
+//                              bytes_read/sizeof(int16_t));
 }
+

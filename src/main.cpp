@@ -20,13 +20,18 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(ret);
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
+  printf("peer_init");
   peer_init();
-  // init_ringbuffer();
-  // start_i2s_task();
+      printf("oai_init_audio_capture");
+  init_ringbuffer();
+  start_i2s_task();
   oai_init_audio_capture();
+  printf("oai_init_audio_decoder");
   oai_init_audio_decoder();
+    printf("oai_wifi");
   oai_wifi();
   oai_webrtc();
+
 }
 #else
 int main(void) {
